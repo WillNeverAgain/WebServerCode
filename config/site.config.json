@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "server": {
+    "name": "LocalHtmlServer",
+    "host": "127.0.0.1",
+    "port": 8787,
+    "enforceHost": true,
+    "allowedHosts": [
+      "localhost",
+      "127.0.0.1",
+      "::1"
+    ]
+  },
+  "site": {
+    "domain": "html.example.com"
+  },
+  "git": {
+    "dailyTime": "03:20",
+    "framework": {
+      "enabled": true,
+      "localPath": ".",
+      "remote": "origin",
+      "branch": "main"
+    },
+    "web": {
+      "enabled": true,
+      "url": "https://github.com/WillNeverAgain/WebCode.git",
+      "localPath": "webapps/current",
+      "remote": "origin",
+      "branch": "main",
+      "entry": "server-entry.js",
+      "cloneIfMissing": true,
+      "pullOnStart": false,
+      "fallbackToBundledExample": true,
+      "bundledExamplePath": "examples/web-repo"
+    },
+    "afterUpdate": {
+      "restartServer": true,
+      "restartCloudflared": true
+    }
+  },
+  "cloudflared": {
+    "enabled": true,
+    "tunnelName": "local-html-server",
+    "tunnelId": "",
+    "credentialsFile": "%USERPROFILE%\\.cloudflared\\<Tunnel-UUID>.json",
+    "configFile": "config/cloudflared.generated.yml",
+    "logFile": "logs/cloudflared.log",
+    "serviceUrl": "http://127.0.0.1:8787"
+  },
+  "securityHeaders": {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "SAMEORIGIN"
+  }
+}

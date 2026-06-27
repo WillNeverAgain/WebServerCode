@@ -1,0 +1,14 @@
+{
+  "name": "windows-git-html-server",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Windows local HTML server with Git-managed config and cloudflared tunnel support.",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "health": "node -e \"fetch('http://127.0.0.1:8787/_health').then(r=>r.text()).then(console.log)\""
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

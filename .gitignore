@@ -1,0 +1,7 @@
+logs/*
+!logs/.gitkeep
+config/cloudflared.generated.yml
+webapps/
+node_modules/
+.DS_Store
+Thumbs.db
