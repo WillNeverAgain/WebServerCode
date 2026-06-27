@@ -1,6 +1,8 @@
 logs/*
 !logs/.gitkeep
 config/cloudflared.generated.yml
+config/cloudflared.local.json
+config/*.local.json
 webapps/
 node_modules/
 .DS_Store

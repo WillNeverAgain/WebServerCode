@@ -9,45 +9,101 @@ param(
 $ErrorActionPreference = 'Stop'
 . "$PSScriptRoot\lib.ps1"
 
-function Set-JsonProperty {
+function Get-FirstJsonArrayFromText {
   param(
-    [Parameter(Mandatory = $true)] $Object,
-    [Parameter(Mandatory = $true)] [string] $Name,
-    [Parameter(Mandatory = $true)] $Value
+    [Parameter(Mandatory = $false)] [string] $Text
   )
 
-  $property = $Object.PSObject.Properties[$Name]
-  if ($null -eq $property) {
-    $Object | Add-Member -MemberType NoteProperty -Name $Name -Value $Value
-  } else {
-    $property.Value = $Value
+  if ([string]::IsNullOrWhiteSpace($Text)) {
+    return ''
   }
+
+  $start = $Text.IndexOf('[')
+  $end = $Text.LastIndexOf(']')
+  if ($start -lt 0 -or $end -le $start) {
+    return ''
+  }
+
+  return $Text.Substring($start, $end - $start + 1)
 }
 
-function Get-TunnelIdByName {
+function Get-TunnelsByName {
   param(
     [Parameter(Mandatory = $true)] [string] $TunnelName
   )
 
   try {
     $jsonOutput = Invoke-CloudflaredCapture @('tunnel', 'list', '--name', $TunnelName, '--output', 'json')
-    $items = $jsonOutput | ConvertFrom-Json
-    $match = @($items | Where-Object { $_.name -eq $TunnelName } | Select-Object -First 1)
-    if ($match.Count -gt 0 -and $match[0].id) {
-      return [string] $match[0].id
+    $jsonArray = Get-FirstJsonArrayFromText $jsonOutput
+    if ([string]::IsNullOrWhiteSpace($jsonArray)) {
+      throw 'cloudflared tunnel list did not include a JSON array.'
     }
+
+    $items = $jsonArray | ConvertFrom-Json
+    return @($items | Where-Object {
+      $_.name -eq $TunnelName -and ($_.deleted_at -eq $null -or $_.deleted_at -eq '0001-01-01T00:00:00Z')
+    })
   } catch {
     Write-Warning "Unable to read tunnel list as JSON: $($_.Exception.Message)"
   }
 
+  return @()
+}
+
+function Select-TunnelForName {
+  param(
+    [Parameter(Mandatory = $true)] [string] $TunnelName,
+    [Parameter(Mandatory = $false)] [string] $PreferredTunnelId = ''
+  )
+
+  $matches = @(Get-TunnelsByName $TunnelName)
+  if ($matches.Count -eq 0) {
+    return $null
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($PreferredTunnelId)) {
+    $preferred = @($matches | Where-Object { ([string] $_.id).ToLowerInvariant() -eq $PreferredTunnelId.ToLowerInvariant() } | Select-Object -First 1)
+    if ($preferred.Count -gt 0) {
+      return $preferred[0]
+    }
+  }
+
+  return @($matches | Sort-Object `
+    @{ Expression = { @($_.connections).Count }; Descending = $true }, `
+    @{ Expression = { $_.created_at }; Descending = $true } | Select-Object -First 1)[0]
+}
+
+function Get-TunnelIdFromCreateOutput {
+  param(
+    [Parameter(Mandatory = $true)] [string] $TunnelName
+  )
+
   try {
-    $listOutput = Invoke-CloudflaredCapture @('tunnel', 'list', '--name', $TunnelName)
-    return Get-FirstUuidFromText $listOutput
+    $createOutput = Invoke-CloudflaredCapture @('tunnel', 'create', $TunnelName)
+    return Get-FirstUuidFromText $createOutput
   } catch {
-    Write-Warning "Unable to read tunnel list: $($_.Exception.Message)"
+    Write-Warning "Tunnel create failed for '$TunnelName': $($_.Exception.Message)"
   }
 
   return ''
+}
+
+function Test-TunnelInfoAccessible {
+  param(
+    [Parameter(Mandatory = $true)] [string] $TunnelId
+  )
+
+  try {
+    [void] (Invoke-CloudflaredCapture `
+      -Arguments @('tunnel', 'info', $TunnelId) `
+      -TimeoutSeconds 45 `
+      -AllowNonZero `
+      -SuppressNonZeroWarning)
+    return $script:LastCloudflaredExitCode -eq 0
+  } catch {
+    Write-Warning "Unable to read tunnel info for ${TunnelId}: $($_.Exception.Message)"
+    return $false
+  }
 }
 
 function Ensure-CloudflaredInstalled {
@@ -118,49 +174,76 @@ function Ensure-TunnelConfig {
   )
 
   $tunnelName = Get-PropertyValue $CloudflaredConfig 'tunnelName' 'local-html-server'
-  $tunnelId = Get-PropertyValue $CloudflaredConfig 'tunnelId' ''
-  $credentialsFile = Get-PropertyValue $CloudflaredConfig 'credentialsFile' ''
-  $credentialsPath = [Environment]::ExpandEnvironmentVariables($credentialsFile)
+  $state = Get-CloudflaredState $Config
+  $tunnelId = Get-PropertyValue $state 'tunnelId' ''
+  $statePath = Get-CloudflaredStatePath $Config
 
-  if (-not (Test-IsPlaceholder $tunnelId) -and -not (Test-IsPlaceholder $credentialsFile) -and (Test-Path -LiteralPath $credentialsPath)) {
-    Write-Host "Tunnel is already configured: $tunnelId"
-    return $true
-  }
-
-  $autoCreate = Get-PropertyValue $CloudflaredConfig 'autoCreateTunnel' $true
-  if ($NoCreateTunnel -or -not $autoCreate) {
-    Write-Warning 'Tunnel ID or credentials are missing, and automatic tunnel creation is disabled.'
+  if (Test-IsPlaceholder $tunnelName) {
+    Write-Warning 'cloudflared.tunnelName is missing or still a placeholder.'
     return $false
   }
 
-  $existingId = Get-TunnelIdByName $tunnelName
-  if ([string]::IsNullOrWhiteSpace($existingId)) {
+  $selectedTunnel = Select-TunnelForName -TunnelName $tunnelName -PreferredTunnelId $tunnelId
+  if ($null -eq $selectedTunnel) {
+    $autoCreate = Get-PropertyValue $CloudflaredConfig 'autoCreateTunnel' $true
+    if ($NoCreateTunnel -or -not $autoCreate) {
+      Write-Warning "Cloudflare tunnel named '$tunnelName' does not exist, and automatic tunnel creation is disabled."
+      return $false
+    }
+
     Write-Host "Creating Cloudflare tunnel: $tunnelName"
-    try {
-      $createOutput = Invoke-CloudflaredCapture @('tunnel', 'create', $tunnelName)
-      $existingId = Get-FirstUuidFromText $createOutput
-    } catch {
-      Write-Warning "Tunnel create failed. Trying to find an existing tunnel named '$tunnelName'. $($_.Exception.Message)"
-      $existingId = Get-TunnelIdByName $tunnelName
+    $createdId = Get-TunnelIdFromCreateOutput $tunnelName
+    if ([string]::IsNullOrWhiteSpace($createdId)) {
+      $selectedTunnel = Select-TunnelForName -TunnelName $tunnelName
+    } else {
+      $selectedTunnel = [pscustomobject]@{
+        id = $createdId
+        name = $tunnelName
+        connections = @()
+      }
     }
   } else {
-    Write-Host "Found existing Cloudflare tunnel '$tunnelName': $existingId"
+    Write-Host "Found Cloudflare tunnel '$tunnelName': $($selectedTunnel.id)"
   }
 
-  if ([string]::IsNullOrWhiteSpace($existingId)) {
+  if ($null -eq $selectedTunnel -or [string]::IsNullOrWhiteSpace([string] $selectedTunnel.id)) {
     Write-Warning "Unable to create or find tunnel '$tunnelName'."
     return $false
   }
 
-  $newCredentialsPath = Get-CloudflaredCredentialsPath $existingId
-  Set-JsonProperty $CloudflaredConfig 'tunnelId' $existingId
-  Set-JsonProperty $CloudflaredConfig 'credentialsFile' "%USERPROFILE%\.cloudflared\$existingId.json"
-  Save-SiteConfig $Config
-  Write-Host "Updated config/site.config.json with tunnelId: $existingId"
+  $targetTunnelId = ([string] $selectedTunnel.id).ToLowerInvariant()
+  if (-not (Test-TunnelInfoAccessible $targetTunnelId)) {
+    Write-Warning "Tunnel '$tunnelName' exists but tunnel info is not accessible: $targetTunnelId"
+    return $false
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($tunnelId) -and $tunnelId.ToLowerInvariant() -ne $targetTunnelId) {
+    Write-Warning "Local state tunnelId '$tunnelId' does not match tunnelName '$tunnelName'. Updating local state to '$targetTunnelId'."
+  }
+
+  $newCredentialsPath = Get-CloudflaredCredentialsPath $targetTunnelId
+  $newCredentialsFile = "%USERPROFILE%\.cloudflared\$targetTunnelId.json"
 
   if (-not (Test-Path -LiteralPath $newCredentialsPath)) {
     Write-Warning "Tunnel credentials file does not exist yet: $newCredentialsPath"
     return $false
+  }
+
+  $stateChanged = $false
+  $currentCredentialsFile = Get-PropertyValue $state 'credentialsFile' ''
+  if ($tunnelId.ToLowerInvariant() -ne $targetTunnelId -or $currentCredentialsFile -ne $newCredentialsFile -or -not (Test-Path -LiteralPath $statePath)) {
+    $stateChanged = $true
+  }
+
+  if ($stateChanged) {
+    $savedPath = Save-CloudflaredState `
+      -Config $Config `
+      -TunnelId $targetTunnelId `
+      -CredentialsFile $newCredentialsFile `
+      -Reason "validated tunnelName '$tunnelName'"
+    Write-Host "Updated local cloudflared state: $savedPath"
+  } else {
+    Write-Host "Local tunnel state is valid: $tunnelName -> $targetTunnelId"
   }
 
   return $true
@@ -184,9 +267,10 @@ function Ensure-TunnelDnsRoute {
     return $true
   }
 
-  $tunnelId = Get-PropertyValue $CloudflaredConfig 'tunnelId' ''
+  $state = Get-CloudflaredState $Config
+  $tunnelId = Get-PropertyValue $state 'tunnelId' ''
   if (Test-IsPlaceholder $tunnelId) {
-    Write-Warning 'DNS route skipped because tunnelId is not configured.'
+    Write-Warning 'DNS route skipped because local cloudflared state tunnelId is not configured.'
     return $false
   }
 

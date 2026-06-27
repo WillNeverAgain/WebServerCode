@@ -12,7 +12,8 @@ $config = Get-SiteConfig
 $cloudflared = Get-PropertyValue $config 'cloudflared' $null
 $domain = Get-PropertyValue $config.site 'domain' ''
 $tunnelName = Get-PropertyValue $cloudflared 'tunnelName' 'local-html-server'
-$tunnelId = Get-PropertyValue $cloudflared 'tunnelId' ''
+$state = Get-CloudflaredState $config
+$tunnelId = Get-PropertyValue $state 'tunnelId' ''
 $tunnelForDns = $tunnelName
 if ($tunnelId -ne '') {
   $tunnelForDns = $tunnelId
@@ -28,16 +29,28 @@ if ($Login) {
 
 if ($CreateTunnel) {
   Write-Host "Creating tunnel: $tunnelName"
-  & $cloudflaredCommand.Source tunnel create $tunnelName
-  if ($LASTEXITCODE -ne 0) {
-    throw 'cloudflared tunnel create failed.'
+  $output = Invoke-CloudflaredCapture @('tunnel', 'create', $tunnelName)
+  $createdId = Get-FirstUuidFromText $output
+  if ([string]::IsNullOrWhiteSpace($createdId)) {
+    throw 'cloudflared tunnel create did not return a tunnel UUID.'
   }
 
-  Write-Host ''
-  Write-Host 'Copy the generated tunnel UUID into config/site.config.json:'
-  Write-Host '  cloudflared.tunnelId'
-  Write-Host 'Then set cloudflared.credentialsFile to:'
-  Write-Host '  %USERPROFILE%\.cloudflared\<Tunnel-UUID>.json'
+  $credentialsFile = "%USERPROFILE%\.cloudflared\$createdId.json"
+  [void] (Save-CloudflaredState `
+    -Config $config `
+    -TunnelId $createdId `
+    -CredentialsFile $credentialsFile `
+    -Reason "manual setup-cloudflared CreateTunnel for '$tunnelName'")
+  Write-Host "Saved tunnel state: $(Get-CloudflaredStatePath $config)"
+  $tunnelForDns = $createdId
+}
+
+$config = Get-SiteConfig
+$cloudflared = Get-PropertyValue $config 'cloudflared' $null
+$state = Get-CloudflaredState $config
+$tunnelId = Get-PropertyValue $state 'tunnelId' ''
+if ($tunnelId -ne '') {
+  $tunnelForDns = $tunnelId
 }
 
 & "$PSScriptRoot\cloudflared-write-config.ps1"
@@ -48,7 +61,12 @@ if ($RouteDns) {
   }
 
   Write-Host "Routing DNS: $domain -> $tunnelForDns"
-  & $cloudflaredCommand.Source tunnel route dns $tunnelForDns $domain
+  $routeArgs = @('tunnel', 'route', 'dns')
+  if (Get-PropertyValue $cloudflared 'overwriteDns' $false) {
+    $routeArgs += '--overwrite-dns'
+  }
+  $routeArgs += @($tunnelForDns, $domain)
+  & $cloudflaredCommand.Source @routeArgs
   if ($LASTEXITCODE -ne 0) {
     throw 'cloudflared tunnel route dns failed.'
   }

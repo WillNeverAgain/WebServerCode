@@ -338,8 +338,10 @@ function Test-CloudflaredConfigReady {
   }
 
   $domain = Get-PropertyValue $Config.site 'domain' ''
-  $tunnelId = Get-PropertyValue $cloudflared 'tunnelId' ''
-  $credentialsFile = Get-PropertyValue $cloudflared 'credentialsFile' ''
+  $state = Get-CloudflaredState $Config
+  $statePath = Get-CloudflaredStatePath $Config
+  $tunnelId = Get-PropertyValue $state 'tunnelId' ''
+  $credentialsFile = Get-PropertyValue $state 'credentialsFile' ''
   $credentialsPath = [Environment]::ExpandEnvironmentVariables($credentialsFile)
 
   $ready = $true
@@ -349,12 +351,12 @@ function Test-CloudflaredConfigReady {
   }
 
   if (Test-IsPlaceholder $tunnelId) {
-    Add-Warning 'cloudflared is not ready: cloudflared.tunnelId is empty or still a placeholder.'
+    Add-Warning "cloudflared is not ready: local state tunnelId is empty or still a placeholder. State file: $statePath"
     $ready = $false
   }
 
   if (Test-IsPlaceholder $credentialsFile) {
-    Add-Warning "cloudflared credentials file is missing or placeholder: $credentialsFile"
+    Add-Warning "cloudflared credentials file is missing or placeholder in local state: $credentialsFile"
     $ready = $false
   } elseif (-not (Test-Path -LiteralPath $credentialsPath)) {
     Add-Warning "cloudflared credentials file does not exist: $credentialsPath"

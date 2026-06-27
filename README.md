@@ -145,7 +145,7 @@ During startup, web repository sync prints live Git clone/fetch/pull progress. I
 
 cloudflared tunnel startup is enabled by default through `cloudflared.autoStart: true` in `config/site.config.json`. Use `-NoCloudflared` for a one-time local-only startup, or set `cloudflared.autoStart` to `false` to disable it by config.
 
-cloudflared installation and tunnel setup are also integrated by default through `cloudflared.autoSetup: true`. When the tunnel is missing, startup can install cloudflared, open the Cloudflare login flow, create the tunnel, write `tunnelId` and `credentialsFile` back to `config/site.config.json`, generate `config/cloudflared.generated.yml`, and attempt the DNS route. Use `-NoCloudflaredSetup` to skip only setup while still allowing an already-configured tunnel to start.
+cloudflared installation and tunnel setup are also integrated by default through `cloudflared.autoSetup: true`. Startup validates the configured `tunnelName`, reconciles the real tunnel ID and credentials in `config/cloudflared.local.json`, generates `config/cloudflared.generated.yml`, and ensures the DNS route. Use `-NoCloudflaredSetup` to skip only setup while still allowing an already-configured tunnel to start.
 
 后台运行：
 
@@ -206,11 +206,15 @@ Show live progress and retry stalled sync:
 把生成的 tunnel UUID 填进 `config/site.config.json`：
 
 ```json
-"cloudflared": {
+// config/cloudflared.local.json
+{
+  "schemaVersion": 1,
   "tunnelId": "<Tunnel-UUID>",
   "credentialsFile": "%USERPROFILE%\\.cloudflared\\<Tunnel-UUID>.json"
 }
 ```
+
+Runtime tunnel state is stored in `config/cloudflared.local.json`, which is not tracked by Git. Keep stable settings such as `tunnelName`, `domain`, protocol, and paths in `config/site.config.json`; run `.\scripts\ensure-cloudflared.ps1` to validate tunnel name/id/credentials/DNS and update local state automatically.
 
 然后创建 DNS 路由并启动：
 

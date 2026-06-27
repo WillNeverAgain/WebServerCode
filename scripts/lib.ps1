@@ -9,13 +9,31 @@ function Get-ConfigPath {
   return Join-Path $root 'config\site.config.json'
 }
 
+function Read-JsonFile {
+  param(
+    [Parameter(Mandatory = $true)] [string] $PathValue
+  )
+
+  if (-not (Test-Path -LiteralPath $PathValue)) {
+    throw "JSON file not found: $PathValue"
+  }
+
+  $text = Get-Content -LiteralPath $PathValue -Raw
+  if ($text.Length -gt 0 -and [int] $text[0] -eq 0xFEFF) {
+    $text = $text.Substring(1)
+  }
+
+  return $text | ConvertFrom-Json
+}
+
 function Get-SiteConfig {
   $configPath = Get-ConfigPath
   if (-not (Test-Path -LiteralPath $configPath)) {
     throw "Config file not found: $configPath"
   }
 
-  return Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
+  $config = Read-JsonFile $configPath
+  return $config
 }
 
 function Save-SiteConfig {
@@ -24,8 +42,90 @@ function Save-SiteConfig {
   )
 
   $configPath = Get-ConfigPath
-  $json = $Config | ConvertTo-Json -Depth 20
+  $cloudflared = Get-PropertyValue $Config 'cloudflared' $null
+  if ($null -ne $cloudflared) {
+    Remove-JsonProperty $cloudflared 'tunnelId'
+    Remove-JsonProperty $cloudflared 'credentialsFile'
+  }
+
+  $json = ConvertTo-PrettyJson $Config
   Write-Utf8NoBomFile -PathValue $configPath -Content ($json + [Environment]::NewLine)
+}
+
+function ConvertTo-PrettyJson {
+  param(
+    [Parameter(Mandatory = $true)] $Value,
+    [Parameter(Mandatory = $false)] [int] $IndentSize = 2
+  )
+
+  $json = $Value | ConvertTo-Json -Depth 20 -Compress
+  $builder = New-Object System.Text.StringBuilder
+  $indent = 0
+  $inString = $false
+  $escaped = $false
+  $indentText = ' ' * $IndentSize
+
+  for ($i = 0; $i -lt $json.Length; $i += 1) {
+    $char = $json[$i]
+
+    if ($inString) {
+      [void] $builder.Append($char)
+      if ($escaped) {
+        $escaped = $false
+      } elseif ($char -eq '\') {
+        $escaped = $true
+      } elseif ($char -eq '"') {
+        $inString = $false
+      }
+      continue
+    }
+
+    switch ($char) {
+      '"' {
+        $inString = $true
+        [void] $builder.Append($char)
+      }
+      '{' {
+        [void] $builder.Append($char)
+        $indent += 1
+        [void] $builder.AppendLine()
+        [void] $builder.Append($indentText * $indent)
+      }
+      '[' {
+        [void] $builder.Append($char)
+        $indent += 1
+        [void] $builder.AppendLine()
+        [void] $builder.Append($indentText * $indent)
+      }
+      '}' {
+        $indent -= 1
+        [void] $builder.AppendLine()
+        [void] $builder.Append($indentText * $indent)
+        [void] $builder.Append($char)
+      }
+      ']' {
+        $indent -= 1
+        [void] $builder.AppendLine()
+        [void] $builder.Append($indentText * $indent)
+        [void] $builder.Append($char)
+      }
+      ',' {
+        [void] $builder.Append($char)
+        [void] $builder.AppendLine()
+        [void] $builder.Append($indentText * $indent)
+      }
+      ':' {
+        [void] $builder.Append(': ')
+      }
+      default {
+        if (-not [char]::IsWhiteSpace($char)) {
+          [void] $builder.Append($char)
+        }
+      }
+    }
+  }
+
+  return $builder.ToString()
 }
 
 function Write-Utf8NoBomFile {
@@ -36,6 +136,93 @@ function Write-Utf8NoBomFile {
 
   $encoding = New-Object System.Text.UTF8Encoding($false)
   [System.IO.File]::WriteAllText($PathValue, $Content, $encoding)
+}
+
+function Remove-JsonProperty {
+  param(
+    [Parameter(Mandatory = $false)] $Object,
+    [Parameter(Mandatory = $true)] [string] $Name
+  )
+
+  if ($null -eq $Object) {
+    return
+  }
+
+  $property = $Object.PSObject.Properties[$Name]
+  if ($null -ne $property) {
+    $Object.PSObject.Properties.Remove($Name)
+  }
+}
+
+function Set-JsonProperty {
+  param(
+    [Parameter(Mandatory = $true)] $Object,
+    [Parameter(Mandatory = $true)] [string] $Name,
+    [Parameter(Mandatory = $true)] $Value
+  )
+
+  $property = $Object.PSObject.Properties[$Name]
+  if ($null -eq $property) {
+    $Object | Add-Member -MemberType NoteProperty -Name $Name -Value $Value
+  } else {
+    $property.Value = $Value
+  }
+}
+
+function Get-CloudflaredStatePath {
+  param(
+    [Parameter(Mandatory = $false)] $Config = $null
+  )
+
+  if ($null -eq $Config) {
+    $configPath = Get-ConfigPath
+    $Config = Read-JsonFile $configPath
+  }
+
+  $cloudflared = Get-PropertyValue $Config 'cloudflared' $null
+  $stateFile = Get-PropertyValue $cloudflared 'stateFile' 'config\cloudflared.local.json'
+  return Resolve-ProjectPath $stateFile
+}
+
+function Get-CloudflaredState {
+  param(
+    [Parameter(Mandatory = $false)] $Config = $null
+  )
+
+  $statePath = Get-CloudflaredStatePath $Config
+  if (-not (Test-Path -LiteralPath $statePath)) {
+    return [pscustomobject]@{}
+  }
+
+  return Read-JsonFile $statePath
+}
+
+function Save-CloudflaredState {
+  param(
+    [Parameter(Mandatory = $true)] $Config,
+    [Parameter(Mandatory = $true)] [string] $TunnelId,
+    [Parameter(Mandatory = $true)] [string] $CredentialsFile,
+    [Parameter(Mandatory = $false)] [string] $Reason = ''
+  )
+
+  $statePath = Get-CloudflaredStatePath $Config
+  Ensure-Directory (Split-Path -Parent $statePath)
+
+  $state = [ordered]@{
+    schemaVersion = 1
+    tunnelId = $TunnelId
+    credentialsFile = $CredentialsFile
+    updatedAt = (Get-Date).ToUniversalTime().ToString('o')
+  }
+
+  if (-not [string]::IsNullOrWhiteSpace($Reason)) {
+    $state.reason = $Reason
+  }
+
+  $json = ConvertTo-PrettyJson $state
+  Write-Utf8NoBomFile -PathValue $statePath -Content ($json + [Environment]::NewLine)
+
+  return $statePath
 }
 
 function Get-PropertyValue {
@@ -386,11 +573,12 @@ function Test-CloudflaredTunnelActive {
   }
 
   $cloudflared = Get-PropertyValue $Config 'cloudflared' $null
-  $tunnelId = Get-PropertyValue $cloudflared 'tunnelId' ''
+  $state = Get-CloudflaredState $Config
+  $tunnelId = Get-PropertyValue $state 'tunnelId' ''
   if (Test-IsPlaceholder $tunnelId) {
     return [pscustomobject]@{
       Ok = $false
-      Message = 'cloudflared.tunnelId is empty or still a placeholder.'
+      Message = 'cloudflared local state tunnelId is empty or still a placeholder.'
       Output = ''
     }
   }

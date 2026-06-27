@@ -1,67 +1,66 @@
 {
-    "schemaVersion":  1,
-    "server":  {
-                   "name":  "LocalHtmlServer",
-                   "host":  "127.0.0.1",
-                   "port":  8787,
-                   "enforceHost":  true,
-                   "allowedHosts":  [
-                                        "localhost",
-                                        "127.0.0.1",
-                                        "::1"
-                                    ]
-               },
-    "site":  {
-                 "domain":  "chenyurui.top"
-             },
-    "git":  {
-                "dailyTime":  "03:20",
-                "framework":  {
-                                  "enabled":  true,
-                                  "localPath":  ".",
-                                  "remote":  "origin",
-                                  "branch":  "main"
-                              },
-                "web":  {
-                            "enabled":  true,
-                            "url":  "https://github.com/WillNeverAgain/WebCode.git",
-                            "localPath":  "webapps/current",
-                            "remote":  "origin",
-                            "branch":  "main",
-                            "entry":  "server-entry.js",
-                            "cloneIfMissing":  true,
-                            "pullOnStart":  false,
-                            "fallbackToBundledExample":  true,
-                            "bundledExamplePath":  "examples/web-repo"
-                        },
-                "afterUpdate":  {
-                                    "restartServer":  true,
-                                    "restartCloudflared":  true
-                                }
-            },
-    "cloudflared":  {
-                        "enabled":  true,
-                        "autoStart":  true,
-                        "autoInstall":  true,
-                        "autoSetup":  true,
-                        "autoLogin":  true,
-                        "autoCreateTunnel":  true,
-                        "autoRouteDns":  true,
-                        "overwriteDns":  true,
-                        "tunnelName":  "local-html-server",
-                        "tunnelId":  "7c3cc3e3-6d47-4e77-b103-6765cbe5e9a3",
-                        "credentialsFile":  "%USERPROFILE%\\.cloudflared\\7c3cc3e3-6d47-4e77-b103-6765cbe5e9a3.json",
-                        "configFile":  "config/cloudflared.generated.yml",
-                        "logFile":  "logs/cloudflared.log",
-                        "protocol":  "http2",
-                        "edgeIpVersion":  "4",
-                        "proxyUrl":  "http://127.0.0.1:7897",
-                        "activeCheckSeconds":  45,
-                        "serviceUrl":  "http://127.0.0.1:8787"
-                    },
-    "securityHeaders":  {
-                            "X-Content-Type-Options":  "nosniff",
-                            "Referrer-Policy":  "no-referrer",
-                            "X-Frame-Options":  "SAMEORIGIN"
-                        }
+  "schemaVersion": 1,
+  "server": {
+    "name": "LocalHtmlServer",
+    "host": "127.0.0.1",
+    "port": 8787,
+    "enforceHost": true,
+    "allowedHosts": [
+      "localhost",
+      "127.0.0.1",
+      "::1"
+    ]
+  },
+  "site": {
+    "domain": "chenyurui.top"
+  },
+  "git": {
+    "dailyTime": "03:20",
+    "framework": {
+      "enabled": true,
+      "localPath": ".",
+      "remote": "origin",
+      "branch": "main"
+    },
+    "web": {
+      "enabled": true,
+      "url": "https://github.com/WillNeverAgain/WebCode.git",
+      "localPath": "webapps/current",
+      "remote": "origin",
+      "branch": "main",
+      "entry": "server-entry.js",
+      "cloneIfMissing": true,
+      "pullOnStart": false,
+      "fallbackToBundledExample": true,
+      "bundledExamplePath": "examples/web-repo"
+    },
+    "afterUpdate": {
+      "restartServer": true,
+      "restartCloudflared": true
+    }
+  },
+  "cloudflared": {
+    "enabled": true,
+    "autoStart": true,
+    "autoInstall": true,
+    "autoSetup": true,
+    "autoLogin": true,
+    "autoCreateTunnel": true,
+    "autoRouteDns": true,
+    "overwriteDns": true,
+    "tunnelName": "NeverAgain",
+    "configFile": "config/cloudflared.generated.yml",
+    "logFile": "logs/cloudflared.log",
+    "protocol": "http2",
+    "edgeIpVersion": "4",
+    "proxyUrl": "http://127.0.0.1:7897",
+    "activeCheckSeconds": 45,
+    "serviceUrl": "http://127.0.0.1:8787",
+    "stateFile": "config/cloudflared.local.json"
+  },
+  "securityHeaders": {
+    "X-Content-Type-Options": "nosniff",
+    "Referrer-Policy": "no-referrer",
+    "X-Frame-Options": "SAMEORIGIN"
+  }
 }

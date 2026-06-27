@@ -27,7 +27,8 @@ $protocol = Get-PropertyValue $cloudflared 'protocol' ''
 $edgeIpVersion = Get-PropertyValue $cloudflared 'edgeIpVersion' ''
 $proxyUrl = Get-PropertyValue $cloudflared 'proxyUrl' ''
 $tunnelName = Get-PropertyValue $cloudflared 'tunnelName' 'local-html-server'
-$tunnelId = Get-PropertyValue $cloudflared 'tunnelId' ''
+$state = Get-CloudflaredState $config
+$tunnelId = Get-PropertyValue $state 'tunnelId' ''
 $tunnel = $tunnelName
 if ($tunnelId -ne '') {
   $tunnel = $tunnelId

@@ -20,7 +20,8 @@ if ($domain -eq '') {
 }
 
 $tunnelName = Get-PropertyValue $cloudflared 'tunnelName' 'local-html-server'
-$tunnelId = Get-PropertyValue $cloudflared 'tunnelId' ''
+$state = Get-CloudflaredState $config
+$tunnelId = Get-PropertyValue $state 'tunnelId' ''
 $tunnel = $tunnelName
 if ($tunnelId -ne '') {
   $tunnel = $tunnelId
@@ -29,14 +30,14 @@ if ($tunnelId -ne '') {
 $serverHost = Get-PropertyValue $config.server 'host' '127.0.0.1'
 $serverPort = Get-PropertyValue $config.server 'port' 8787
 $serviceUrl = Get-PropertyValue $cloudflared 'serviceUrl' "http://$($serverHost):$($serverPort)"
-$credentialsFile = Get-PropertyValue $cloudflared 'credentialsFile' ''
+$credentialsFile = Get-PropertyValue $state 'credentialsFile' ''
 $configFile = Get-PropertyValue $cloudflared 'configFile' 'config\cloudflared.generated.yml'
 $logFile = Get-PropertyValue $cloudflared 'logFile' 'logs\cloudflared.log'
 $protocol = Get-PropertyValue $cloudflared 'protocol' ''
 $edgeIpVersion = Get-PropertyValue $cloudflared 'edgeIpVersion' ''
 
-if ($credentialsFile -eq '' -or $credentialsFile -like '*<Tunnel-UUID>*') {
-  Write-Warning 'cloudflared.credentialsFile still looks like a placeholder. Run setup-cloudflared.ps1 -CreateTunnel and update config/site.config.json with the generated UUID.'
+if ((Test-IsPlaceholder $tunnelId) -or (Test-IsPlaceholder $credentialsFile)) {
+  throw 'cloudflared local state is missing tunnelId or credentialsFile. Run .\scripts\ensure-cloudflared.ps1 first.'
 }
 
 $configPath = Resolve-ProjectPath $configFile
