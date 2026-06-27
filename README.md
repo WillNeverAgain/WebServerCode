@@ -137,9 +137,15 @@ One-click startup:
 ```powershell
 .\scripts\start-all.ps1
 .\scripts\start-all.ps1 -WebSyncStallTimeoutSeconds 180 -WebSyncRetries 3
+.\scripts\start-all.ps1 -NoCloudflared
+.\scripts\start-all.ps1 -NoCloudflaredSetup
 ```
 
 During startup, web repository sync prints live Git clone/fetch/pull progress. If no new output is seen for the configured stall timeout, the Git process is stopped and retried. Defaults: 120 seconds and 2 retries.
+
+cloudflared tunnel startup is enabled by default through `cloudflared.autoStart: true` in `config/site.config.json`. Use `-NoCloudflared` for a one-time local-only startup, or set `cloudflared.autoStart` to `false` to disable it by config.
+
+cloudflared installation and tunnel setup are also integrated by default through `cloudflared.autoSetup: true`. When the tunnel is missing, startup can install cloudflared, open the Cloudflare login flow, create the tunnel, write `tunnelId` and `credentialsFile` back to `config/site.config.json`, generate `config/cloudflared.generated.yml`, and attempt the DNS route. Use `-NoCloudflaredSetup` to skip only setup while still allowing an already-configured tunnel to start.
 
 后台运行：
 

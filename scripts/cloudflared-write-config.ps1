@@ -32,6 +32,8 @@ $serviceUrl = Get-PropertyValue $cloudflared 'serviceUrl' "http://$($serverHost)
 $credentialsFile = Get-PropertyValue $cloudflared 'credentialsFile' ''
 $configFile = Get-PropertyValue $cloudflared 'configFile' 'config\cloudflared.generated.yml'
 $logFile = Get-PropertyValue $cloudflared 'logFile' 'logs\cloudflared.log'
+$protocol = Get-PropertyValue $cloudflared 'protocol' ''
+$edgeIpVersion = Get-PropertyValue $cloudflared 'edgeIpVersion' ''
 
 if ($credentialsFile -eq '' -or $credentialsFile -like '*<Tunnel-UUID>*') {
   Write-Warning 'cloudflared.credentialsFile still looks like a placeholder. Run setup-cloudflared.ps1 -CreateTunnel and update config/site.config.json with the generated UUID.'
@@ -54,5 +56,13 @@ ingress:
   - service: http_status:404
 "@
 
-Set-Content -LiteralPath $configPath -Value $content -Encoding UTF8
+if (-not [string]::IsNullOrWhiteSpace($edgeIpVersion)) {
+  $content = "edge-ip-version: $(ConvertTo-YamlSingleQuoted $edgeIpVersion)`n$content"
+}
+
+if (-not [string]::IsNullOrWhiteSpace($protocol)) {
+  $content = "protocol: $(ConvertTo-YamlSingleQuoted $protocol)`n$content"
+}
+
+Write-Utf8NoBomFile -PathValue $configPath -Content ($content + [Environment]::NewLine)
 Write-Host "Wrote cloudflared config: $configPath"

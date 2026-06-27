@@ -2,7 +2,9 @@
 param(
   [switch] $SkipGitSync,
   [switch] $SkipScheduledTasks,
-  [switch] $SkipCloudflared,
+  [Alias('SkipCloudflared')]
+  [switch] $NoCloudflared,
+  [switch] $NoCloudflaredSetup,
   [switch] $InstallCloudflared,
   [switch] $Strict,
   [int] $WebSyncStallTimeoutSeconds = 120,
@@ -167,8 +169,90 @@ function Install-AutomationTasks {
       }
     }
   } catch {
-    Add-ErrorMessage "Failed to install scheduled tasks: $($_.Exception.Message)"
+    $message = "Failed to install scheduled tasks: $($_.Exception.Message)"
+    if ($Strict) {
+      Add-ErrorMessage $message
+    } else {
+      if ($message -match 'Run PowerShell as Administrator') {
+        Add-Warning $message
+      } else {
+        Add-Warning "$message You can run PowerShell as Administrator, or rerun with -SkipScheduledTasks."
+      }
+    }
   }
+}
+
+function Get-WebRequestFailureDetail {
+  param([Parameter(Mandatory = $true)] $ErrorRecord)
+
+  $response = $ErrorRecord.Exception.Response
+  if ($null -eq $response) {
+    return $ErrorRecord.Exception.Message
+  }
+
+  $statusCode = [int] $response.StatusCode
+  $statusDescription = $response.StatusDescription
+  $body = ''
+  try {
+    $stream = $response.GetResponseStream()
+    if ($null -ne $stream) {
+      $reader = New-Object System.IO.StreamReader($stream)
+      $body = $reader.ReadToEnd()
+      $reader.Dispose()
+    }
+  } catch {
+    $body = ''
+  }
+
+  if ([string]::IsNullOrWhiteSpace($body)) {
+    return "HTTP ${statusCode} ${statusDescription}"
+  }
+
+  return "HTTP ${statusCode} ${statusDescription}. Body: $body"
+}
+
+function Invoke-LocalHealthCheck {
+  param([Parameter(Mandatory = $true)] [string] $HealthUrl)
+
+  try {
+    $response = Invoke-WebRequest -UseBasicParsing -Uri $HealthUrl -TimeoutSec 8
+    if ($response.StatusCode -eq 200) {
+      return [pscustomobject]@{
+        Ok = $true
+        Message = "Local server health check passed: $HealthUrl"
+      }
+    }
+
+    return [pscustomobject]@{
+      Ok = $false
+      Message = "Local server health check returned HTTP $($response.StatusCode): $HealthUrl"
+    }
+  } catch {
+    return [pscustomobject]@{
+      Ok = $false
+      Message = "Local server health check failed: $(Get-WebRequestFailureDetail $_)"
+    }
+  }
+}
+
+function Wait-CloudflaredTunnelActive {
+  param(
+    [Parameter(Mandatory = $true)] $Config,
+    [Parameter(Mandatory = $false)] [int] $TimeoutSeconds = 45
+  )
+
+  $deadline = (Get-Date).AddSeconds([Math]::Max(5, $TimeoutSeconds))
+  $lastStatus = $null
+  do {
+    $lastStatus = Test-CloudflaredTunnelActive -Config $Config -TimeoutSeconds 20
+    if ($lastStatus.Ok) {
+      return $lastStatus
+    }
+
+    Start-Sleep -Seconds 5
+  } while ((Get-Date) -lt $deadline)
+
+  return $lastStatus
 }
 
 function Start-LocalServer {
@@ -186,21 +270,35 @@ function Start-LocalServer {
   $port = Get-PropertyValue $Config.server 'port' 8787
   $healthUrl = "http://${hostName}:${port}/_health"
 
+  $health = Invoke-LocalHealthCheck $healthUrl
+  if ($health.Ok) {
+    Add-Action $health.Message
+    return
+  }
+
+  Add-Warning $health.Message
+  Add-Warning 'Restarting local server once because the health check failed.'
+
   try {
-    $response = Invoke-WebRequest -UseBasicParsing -Uri $healthUrl -TimeoutSec 8
-    if ($response.StatusCode -eq 200) {
-      Add-Action "Local server health check passed: $healthUrl"
-    } else {
-      Add-ErrorMessage "Local server health check returned HTTP $($response.StatusCode): $healthUrl"
-    }
+    & "$PSScriptRoot\restart-server.ps1"
+    Start-Sleep -Milliseconds 800
   } catch {
-    Add-ErrorMessage "Local server health check failed: $($_.Exception.Message)"
+    Add-ErrorMessage "Failed to restart local server after health failure: $($_.Exception.Message)"
+    return
+  }
+
+  $health = Invoke-LocalHealthCheck $healthUrl
+  if ($health.Ok) {
+    Add-Action $health.Message
+  } else {
+    Add-ErrorMessage $health.Message
   }
 }
 
 function Ensure-CloudflaredCommand {
   if (Test-CommandExists 'cloudflared') {
-    $version = (& cloudflared --version)
+    $cloudflaredCommand = Get-RequiredCommand 'cloudflared'
+    $version = (& $cloudflaredCommand.Source --version)
     Add-Action "cloudflared detected: $version"
     return $true
   }
@@ -219,7 +317,8 @@ function Ensure-CloudflaredCommand {
   }
 
   if (Test-CommandExists 'cloudflared') {
-    $version = (& cloudflared --version)
+    $cloudflaredCommand = Get-RequiredCommand 'cloudflared'
+    $version = (& $cloudflaredCommand.Source --version)
     Add-Action "cloudflared detected after install: $version"
     return $true
   }
@@ -265,10 +364,10 @@ function Test-CloudflaredConfigReady {
   if (-not $ready) {
     Write-Host ""
     Write-Host "Cloudflared setup commands:"
-    Write-Host "  .\scripts\install-cloudflared.ps1 -UseWinget"
-    Write-Host "  .\scripts\setup-cloudflared.ps1 -Login -CreateTunnel"
-    Write-Host "  # Put the generated tunnel UUID into config\site.config.json"
-    Write-Host "  .\scripts\setup-cloudflared.ps1 -RouteDns"
+    Write-Host "  .\scripts\ensure-cloudflared.ps1"
+    Write-Host "  .\scripts\start-all.ps1"
+    Write-Host "  # Or skip automatic setup:"
+    Write-Host "  .\scripts\start-all.ps1 -NoCloudflaredSetup"
   }
 
   return $ready
@@ -277,9 +376,32 @@ function Test-CloudflaredConfigReady {
 function Start-CloudflaredTunnel {
   param([Parameter(Mandatory = $true)] $Config)
 
-  if ($SkipCloudflared) {
-    Add-Warning 'cloudflared start skipped by -SkipCloudflared.'
+  if ($NoCloudflared) {
+    Add-Warning 'cloudflared start skipped by command line switch. Remove -NoCloudflared to enable it.'
     return $false
+  }
+
+  $cloudflared = Get-PropertyValue $Config 'cloudflared' $null
+  $autoStart = Get-PropertyValue $cloudflared 'autoStart' $true
+  if (-not $autoStart) {
+    Add-Warning 'cloudflared autoStart is false in config/site.config.json.'
+    return $false
+  }
+
+  $autoSetup = Get-PropertyValue $cloudflared 'autoSetup' $true
+  if ($autoSetup -and -not $NoCloudflaredSetup) {
+    try {
+      & "$PSScriptRoot\ensure-cloudflared.ps1"
+      Add-Action 'cloudflared installation and tunnel configuration check finished.'
+      $Config = Get-SiteConfig
+    } catch {
+      Add-ErrorMessage "cloudflared automatic setup failed: $($_.Exception.Message)"
+      return $false
+    }
+  } elseif ($NoCloudflaredSetup) {
+    Add-Warning 'cloudflared setup skipped by -NoCloudflaredSetup.'
+  } else {
+    Add-Warning 'cloudflared autoSetup is false in config/site.config.json.'
   }
 
   if (-not (Test-CloudflaredConfigReady $Config)) {
@@ -299,8 +421,35 @@ function Start-CloudflaredTunnel {
       return $false
     }
 
-    Add-Action "cloudflared is running. PID: $($process.ProcessId)"
-    return $true
+    $activeCheckSeconds = Get-PropertyValue $cloudflared 'activeCheckSeconds' 45
+    $active = Wait-CloudflaredTunnelActive -Config $Config -TimeoutSeconds $activeCheckSeconds
+    if ($active.Ok) {
+      Add-Action "cloudflared is running and tunnel is active. PID: $($process.ProcessId)"
+      return $true
+    }
+
+    Add-Warning "cloudflared process is running, but the tunnel is not active yet: $($active.Message)"
+    Add-Warning 'Restarting cloudflared once and checking again.'
+
+    & "$PSScriptRoot\stop-cloudflared.ps1"
+    Start-Sleep -Milliseconds 800
+    & "$PSScriptRoot\start-cloudflared.ps1" -Background
+    Start-Sleep -Milliseconds 1500
+
+    $process = Get-CloudflaredProcess
+    if ($null -eq $process) {
+      Add-ErrorMessage 'cloudflared did not remain running after restart. Check logs\cloudflared.err.log and logs\cloudflared.out.log.'
+      return $false
+    }
+
+    $active = Wait-CloudflaredTunnelActive -Config $Config -TimeoutSeconds $activeCheckSeconds
+    if ($active.Ok) {
+      Add-Action "cloudflared is running and tunnel is active. PID: $($process.ProcessId)"
+      return $true
+    }
+
+    Add-ErrorMessage "cloudflared tunnel has no active connection, so https://$((Get-PropertyValue $Config.site 'domain' 'configured-domain')) will show Cloudflare 1033. Details: $($active.Message) Check logs\cloudflared.err.log; allow outbound Cloudflare Tunnel traffic to region1.v2.argotunnel.com:7844 and region2.v2.argotunnel.com:7844, or adjust your proxy/TUN rules."
+    return $false
   } catch {
     Add-ErrorMessage "Failed to start cloudflared: $($_.Exception.Message)"
     return $false

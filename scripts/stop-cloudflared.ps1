@@ -8,7 +8,7 @@ param(
 $process = Get-CloudflaredProcess
 if ($null -eq $process) {
   Write-Host 'cloudflared is not running.'
-  exit 0
+  return
 }
 
 Write-Host "Stopping cloudflared. PID: $($process.ProcessId)"

@@ -18,6 +18,26 @@ function Get-SiteConfig {
   return Get-Content -LiteralPath $configPath -Raw | ConvertFrom-Json
 }
 
+function Save-SiteConfig {
+  param(
+    [Parameter(Mandatory = $true)] $Config
+  )
+
+  $configPath = Get-ConfigPath
+  $json = $Config | ConvertTo-Json -Depth 20
+  Write-Utf8NoBomFile -PathValue $configPath -Content ($json + [Environment]::NewLine)
+}
+
+function Write-Utf8NoBomFile {
+  param(
+    [Parameter(Mandatory = $true)] [string] $PathValue,
+    [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $Content
+  )
+
+  $encoding = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($PathValue, $Content, $encoding)
+}
+
 function Get-PropertyValue {
   param(
     [Parameter(Mandatory = $false)] $Object,
@@ -82,11 +102,221 @@ function Get-RequiredCommand {
   )
 
   $command = Get-Command $Name -ErrorAction SilentlyContinue
+  if ($null -eq $command -and $Name -eq 'cloudflared') {
+    $cloudflaredPath = Find-CloudflaredExecutable
+    if ($null -ne $cloudflaredPath) {
+      return [pscustomobject]@{
+        Name = 'cloudflared'
+        Source = $cloudflaredPath
+        Path = $cloudflaredPath
+      }
+    }
+  }
+
   if ($null -eq $command) {
     throw "Required command not found: $Name"
   }
 
   return $command
+}
+
+function Find-CloudflaredExecutable {
+  $command = Get-Command cloudflared -ErrorAction SilentlyContinue
+  if ($null -ne $command) {
+    return $command.Source
+  }
+
+  $candidatePaths = @(
+    (Join-Path ${env:ProgramFiles(x86)} 'cloudflared\cloudflared.exe'),
+    (Join-Path $env:ProgramFiles 'cloudflared\cloudflared.exe'),
+    (Join-Path $env:LOCALAPPDATA 'Microsoft\WinGet\Packages\Cloudflare.cloudflared_Microsoft.Winget.Source_8wekyb3d8bbwe\cloudflared.exe')
+  )
+
+  foreach ($candidatePath in $candidatePaths) {
+    if (-not [string]::IsNullOrWhiteSpace($candidatePath) -and (Test-Path -LiteralPath $candidatePath)) {
+      return $candidatePath
+    }
+  }
+
+  return $null
+}
+
+function Add-ToProcessPath {
+  param(
+    [Parameter(Mandatory = $true)] [string] $DirectoryPath
+  )
+
+  if (-not (Test-Path -LiteralPath $DirectoryPath)) {
+    return
+  }
+
+  $pathParts = @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+  if (-not ($pathParts -contains $DirectoryPath)) {
+    $env:Path = "$env:Path;$DirectoryPath"
+  }
+}
+
+function Get-CloudflaredHome {
+  return Join-Path $env:USERPROFILE '.cloudflared'
+}
+
+function Get-CloudflaredCertPath {
+  return Join-Path (Get-CloudflaredHome) 'cert.pem'
+}
+
+function Get-CloudflaredCredentialsPath {
+  param(
+    [Parameter(Mandatory = $true)] [string] $TunnelId
+  )
+
+  return Join-Path (Get-CloudflaredHome) "$TunnelId.json"
+}
+
+function Get-FirstUuidFromText {
+  param(
+    [Parameter(Mandatory = $false)] [string] $Text
+  )
+
+  $match = [regex]::Match($Text, '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}')
+  if ($match.Success) {
+    return $match.Value.ToLowerInvariant()
+  }
+
+  return ''
+}
+
+function Invoke-CloudflaredCapture {
+  param(
+    [Parameter(Mandatory = $true)] [string[]] $Arguments,
+    [Parameter(Mandatory = $false)] [string] $LogFile = 'logs\cloudflared-setup.log',
+    [Parameter(Mandatory = $false)] [int] $TimeoutSeconds = 300,
+    [Parameter(Mandatory = $false)] [switch] $AllowNonZero,
+    [Parameter(Mandatory = $false)] [switch] $SuppressNonZeroWarning
+  )
+
+  $cloudflaredCommand = Get-RequiredCommand 'cloudflared'
+  $display = "$($cloudflaredCommand.Source) $($Arguments -join ' ')"
+  Write-ProjectLog "Running: $display" $LogFile
+  Write-Host "[cloudflared] $display"
+
+  $tempBase = Join-Path ([System.IO.Path]::GetTempPath()) ("html-server-cloudflared-{0}" -f ([Guid]::NewGuid().ToString('N')))
+  $stdoutPath = "$tempBase.out"
+  $stderrPath = "$tempBase.err"
+  $stdoutPosition = 0L
+  $stderrPosition = 0L
+  $stdoutStream = $null
+  $stderrStream = $null
+  $process = $null
+  $captured = New-Object System.Collections.Generic.List[string]
+  $startedAt = Get-Date
+
+  try {
+    $stdoutStream = New-Object System.IO.FileStream($stdoutPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+    $stderrStream = New-Object System.IO.FileStream($stderrPath, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write, [System.IO.FileShare]::ReadWrite)
+
+    $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $cloudflaredCommand.Source
+    $startInfo.Arguments = Join-CommandArguments $Arguments
+    $startInfo.UseShellExecute = $false
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $startInfo.CreateNoWindow = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $startInfo
+    [void] $process.Start()
+    $stdoutCopy = $process.StandardOutput.BaseStream.CopyToAsync($stdoutStream)
+    $stderrCopy = $process.StandardError.BaseStream.CopyToAsync($stderrStream)
+
+    while (-not $process.HasExited) {
+      $stdout = Read-NewFileContent $stdoutPath ([ref] $stdoutPosition)
+      $stderr = Read-NewFileContent $stderrPath ([ref] $stderrPosition)
+
+      if ($stdout.Length -gt 0) {
+        $captured.Add($stdout) | Out-Null
+        Write-LiveCommandOutput $stdout 'cloudflared' $LogFile
+      }
+
+      if ($stderr.Length -gt 0) {
+        $captured.Add($stderr) | Out-Null
+        Write-LiveCommandOutput $stderr 'cloudflared' $LogFile
+      }
+
+      if ($TimeoutSeconds -gt 0 -and ((Get-Date) - $startedAt).TotalSeconds -ge $TimeoutSeconds) {
+        try {
+          Stop-ProcessTree -ProcessId $process.Id
+        } catch {
+          Write-ProjectLog "Failed to stop timed-out cloudflared process $($process.Id): $($_.Exception.Message)" $LogFile
+        }
+
+        throw "cloudflared command timed out after ${TimeoutSeconds}s: $display"
+      }
+
+      Start-Sleep -Milliseconds 500
+      $process.Refresh()
+    }
+
+    $process.WaitForExit()
+    if ($null -ne $stdoutCopy) {
+      [void] $stdoutCopy.Wait(2000)
+    }
+    if ($null -ne $stderrCopy) {
+      [void] $stderrCopy.Wait(2000)
+    }
+
+    Start-Sleep -Milliseconds 100
+    if ($null -ne $stdoutStream) {
+      $stdoutStream.Flush()
+      $stdoutStream.Dispose()
+      $stdoutStream = $null
+    }
+    if ($null -ne $stderrStream) {
+      $stderrStream.Flush()
+      $stderrStream.Dispose()
+      $stderrStream = $null
+    }
+
+    $stdout = Read-NewFileContent $stdoutPath ([ref] $stdoutPosition)
+    $stderr = Read-NewFileContent $stderrPath ([ref] $stderrPosition)
+    if ($stdout.Length -gt 0) {
+      $captured.Add($stdout) | Out-Null
+      Write-LiveCommandOutput $stdout 'cloudflared' $LogFile
+    }
+    if ($stderr.Length -gt 0) {
+      $captured.Add($stderr) | Out-Null
+      Write-LiveCommandOutput $stderr 'cloudflared' $LogFile
+    }
+
+    $exitCode = $process.ExitCode
+    $script:LastCloudflaredExitCode = $exitCode
+    if ($exitCode -ne 0) {
+      $message = "cloudflared command failed with exit code ${exitCode}: $($Arguments -join ' ')"
+      Write-ProjectLog $message $LogFile
+      if (-not $AllowNonZero) {
+        throw $message
+      }
+
+      if (-not $SuppressNonZeroWarning) {
+        Write-Warning $message
+      }
+    }
+
+    Write-ProjectLog "Command completed: $display" $LogFile
+    return ($captured -join "`n")
+  } finally {
+    if ($null -ne $stdoutStream) {
+      $stdoutStream.Dispose()
+    }
+    if ($null -ne $stderrStream) {
+      $stderrStream.Dispose()
+    }
+
+    foreach ($tempPath in @($stdoutPath, $stderrPath)) {
+      if (Test-Path -LiteralPath $tempPath) {
+        Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+      }
+    }
+  }
 }
 
 function Get-ServerPidFile {
@@ -145,6 +375,63 @@ function Get-CloudflaredProcess {
   return $null
 }
 
+function Test-CloudflaredTunnelActive {
+  param(
+    [Parameter(Mandatory = $false)] $Config = $null,
+    [Parameter(Mandatory = $false)] [int] $TimeoutSeconds = 45
+  )
+
+  if ($null -eq $Config) {
+    $Config = Get-SiteConfig
+  }
+
+  $cloudflared = Get-PropertyValue $Config 'cloudflared' $null
+  $tunnelId = Get-PropertyValue $cloudflared 'tunnelId' ''
+  if (Test-IsPlaceholder $tunnelId) {
+    return [pscustomobject]@{
+      Ok = $false
+      Message = 'cloudflared.tunnelId is empty or still a placeholder.'
+      Output = ''
+    }
+  }
+
+  try {
+    $output = Invoke-CloudflaredCapture `
+      -Arguments @('tunnel', 'info', $tunnelId) `
+      -TimeoutSeconds $TimeoutSeconds `
+      -AllowNonZero `
+      -SuppressNonZeroWarning
+
+    if ($script:LastCloudflaredExitCode -ne 0) {
+      return [pscustomobject]@{
+        Ok = $false
+        Message = "cloudflared tunnel info failed with exit code $script:LastCloudflaredExitCode."
+        Output = $output
+      }
+    }
+
+    if ($output -match 'does not have any active connection') {
+      return [pscustomobject]@{
+        Ok = $false
+        Message = 'Cloudflare reports that the tunnel has no active connection.'
+        Output = $output
+      }
+    }
+
+    return [pscustomobject]@{
+      Ok = $true
+      Message = 'Cloudflare tunnel has at least one active connection.'
+      Output = $output
+    }
+  } catch {
+    return [pscustomobject]@{
+      Ok = $false
+      Message = "Unable to check Cloudflare tunnel active connection: $($_.Exception.Message)"
+      Output = ''
+    }
+  }
+}
+
 function Get-TaskExists {
   param(
     [Parameter(Mandatory = $true)] [string] $TaskName
@@ -175,6 +462,10 @@ function Test-CommandExists {
   param(
     [Parameter(Mandatory = $true)] [string] $Name
   )
+
+  if ($Name -eq 'cloudflared') {
+    return $null -ne (Find-CloudflaredExecutable)
+  }
 
   return $null -ne (Get-Command $Name -ErrorAction SilentlyContinue)
 }
@@ -232,7 +523,9 @@ function Invoke-CheckedCommand {
   $exitCode = $LASTEXITCODE
 
   foreach ($line in $output) {
-    Write-ProjectLog ([string] $line) $LogFile
+    if (-not [string]::IsNullOrEmpty([string] $line)) {
+      Write-ProjectLog ([string] $line) $LogFile
+    }
   }
 
   if ($exitCode -ne 0) {

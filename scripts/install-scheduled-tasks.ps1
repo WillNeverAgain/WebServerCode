@@ -17,44 +17,77 @@ if ($DailyAt -eq '') {
 
 $dailyTime = [DateTime]::ParseExact($DailyAt, 'HH:mm', [Globalization.CultureInfo]::InvariantCulture)
 $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -MultipleInstances IgnoreNew
+$script:TaskInstallFailures = New-Object System.Collections.Generic.List[string]
+
+function Register-ManagedScheduledTask {
+  param(
+    [Parameter(Mandatory = $true)] [string] $TaskName,
+    [Parameter(Mandatory = $true)] $Action,
+    [Parameter(Mandatory = $true)] $Trigger,
+    [Parameter(Mandatory = $true)] [string] $Description,
+    [Parameter(Mandatory = $true)] [string] $SuccessMessage
+  )
+
+  try {
+    Register-ScheduledTask `
+      -TaskName $TaskName `
+      -Action $Action `
+      -Trigger $Trigger `
+      -Settings $settings `
+      -Description $Description `
+      -Force `
+      -ErrorAction Stop | Out-Null
+
+    if (-not (Get-TaskExists $TaskName)) {
+      throw 'Task was not found after registration.'
+    }
+
+    Write-Host $SuccessMessage
+    return $true
+  } catch {
+    $message = "Failed to install scheduled task '$TaskName': $($_.Exception.Message)"
+    Write-Warning $message
+    $script:TaskInstallFailures.Add($message) | Out-Null
+    return $false
+  }
+}
 
 $serverAction = New-ScheduledTaskAction `
   -Execute 'powershell.exe' `
   -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$root\scripts\start-server.ps1`" -Background"
 $serverTrigger = New-ScheduledTaskTrigger -AtLogOn
-Register-ScheduledTask `
+[void] (Register-ManagedScheduledTask `
   -TaskName "$serverName-Start" `
   -Action $serverAction `
   -Trigger $serverTrigger `
-  -Settings $settings `
   -Description 'Start the local HTML server at user logon.' `
-  -Force | Out-Null
-Write-Host "Installed scheduled task: $serverName-Start"
+  -SuccessMessage "Installed scheduled task: $serverName-Start")
 
 $pullAction = New-ScheduledTaskAction `
   -Execute 'powershell.exe' `
   -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$root\scripts\update-from-git.ps1`""
 $pullTrigger = New-ScheduledTaskTrigger -Daily -At $dailyTime
-Register-ScheduledTask `
+[void] (Register-ManagedScheduledTask `
   -TaskName "$serverName-GitPull" `
   -Action $pullAction `
   -Trigger $pullTrigger `
-  -Settings $settings `
   -Description 'Pull Git updates for the local HTML server once per day.' `
-  -Force | Out-Null
-Write-Host "Installed scheduled task: $serverName-GitPull at $DailyAt"
+  -SuccessMessage "Installed scheduled task: $serverName-GitPull at $DailyAt")
 
 if ($IncludeCloudflared) {
   $cloudflaredAction = New-ScheduledTaskAction `
     -Execute 'powershell.exe' `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$root\scripts\start-cloudflared.ps1`" -Background"
   $cloudflaredTrigger = New-ScheduledTaskTrigger -AtLogOn
-  Register-ScheduledTask `
+  [void] (Register-ManagedScheduledTask `
     -TaskName "$serverName-Cloudflared" `
     -Action $cloudflaredAction `
     -Trigger $cloudflaredTrigger `
-    -Settings $settings `
     -Description 'Start cloudflared tunnel at user logon.' `
-    -Force | Out-Null
-  Write-Host "Installed scheduled task: $serverName-Cloudflared"
+    -SuccessMessage "Installed scheduled task: $serverName-Cloudflared")
+}
+
+if ($script:TaskInstallFailures.Count -gt 0) {
+  $details = $script:TaskInstallFailures -join "`n"
+  throw "Scheduled task installation had failures:`n$details`nRun PowerShell as Administrator, or rerun start-all with -SkipScheduledTasks."
 }

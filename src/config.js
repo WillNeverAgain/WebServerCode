@@ -100,7 +100,12 @@ function loadConfig() {
     return cachedConfig;
   }
 
-  const parsed = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  let configText = fs.readFileSync(configPath, 'utf8');
+  if (configText.charCodeAt(0) === 0xFEFF) {
+    configText = configText.slice(1);
+  }
+
+  const parsed = JSON.parse(configText);
   cachedConfig = validateConfig(parsed);
   cachedMtimeMs = stat.mtimeMs;
   return cachedConfig;
