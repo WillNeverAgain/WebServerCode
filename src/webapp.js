@@ -18,28 +18,108 @@ function resolveInside(basePath, value, label) {
   return resolved;
 }
 
+function normalizeWebMode(mode) {
+  const normalized = String(mode || 'auto').trim().toLowerCase();
+  if (['auto', 'server-entry', 'static-spa', 'static-site'].includes(normalized)) {
+    return normalized;
+  }
+
+  if (['entry', 'server', 'module'].includes(normalized)) {
+    return 'server-entry';
+  }
+
+  if (['static', 'index', 'html'].includes(normalized)) {
+    return 'static-spa';
+  }
+
+  throw new Error(`Unsupported git.web.mode: ${mode}`);
+}
+
+function getServerEntry(webGitConfig) {
+  return webGitConfig.entry || 'server-entry.js';
+}
+
+function getStaticEntry(webGitConfig) {
+  return webGitConfig.staticEntry || webGitConfig.index || 'index.html';
+}
+
+function getStaticRoot(webGitConfig) {
+  return webGitConfig.staticRoot || webGitConfig.root || '.';
+}
+
+function getStaticEntryPath(webRoot, webGitConfig) {
+  const rootPath = resolveInside(webRoot, getStaticRoot(webGitConfig), 'static web root');
+  return resolveInside(rootPath, getStaticEntry(webGitConfig), 'static web entry');
+}
+
+function selectWebRootCandidate(webRoot, source, webGitConfig, requestedMode) {
+  const serverEntryPath = resolveInside(webRoot, getServerEntry(webGitConfig), 'web entry');
+  const hasServerEntry = fs.existsSync(serverEntryPath);
+
+  if (requestedMode === 'server-entry') {
+    return hasServerEntry ? {
+      mode: 'server-entry',
+      webRoot,
+      source,
+      entryPath: serverEntryPath
+    } : null;
+  }
+
+  if (requestedMode === 'static-spa' || requestedMode === 'static-site') {
+    const staticEntryPath = getStaticEntryPath(webRoot, webGitConfig);
+    const hasStaticEntry = fs.existsSync(staticEntryPath);
+    return hasStaticEntry ? {
+      mode: requestedMode,
+      webRoot,
+      source,
+      entryPath: staticEntryPath
+    } : null;
+  }
+
+  if (hasServerEntry) {
+    return {
+      mode: 'server-entry',
+      webRoot,
+      source,
+      entryPath: serverEntryPath
+    };
+  }
+
+  const staticEntryPath = getStaticEntryPath(webRoot, webGitConfig);
+  const hasStaticEntry = fs.existsSync(staticEntryPath);
+
+  if (hasStaticEntry) {
+    return {
+      mode: 'static-spa',
+      webRoot,
+      source,
+      entryPath: staticEntryPath
+    };
+  }
+
+  return null;
+}
+
 function chooseWebRoot(webGitConfig) {
   const configuredRoot = webGitConfig.localPathResolved || resolveProjectPath(webGitConfig.localPath);
-  const entry = webGitConfig.entry || 'server-entry.js';
+  const requestedMode = normalizeWebMode(webGitConfig.mode);
+  const configured = selectWebRootCandidate(configuredRoot, 'configured', webGitConfig, requestedMode);
 
-  if (fs.existsSync(path.join(configuredRoot, entry))) {
-    return {
-      webRoot: configuredRoot,
-      source: 'configured'
-    };
+  if (configured) {
+    return configured;
   }
 
   if (webGitConfig.fallbackToBundledExample) {
     const bundledRoot = webGitConfig.bundledExamplePathResolved || resolveProjectPath(webGitConfig.bundledExamplePath);
-    if (fs.existsSync(path.join(bundledRoot, entry))) {
-      return {
-        webRoot: bundledRoot,
-        source: 'bundled-example'
-      };
+    const bundled = selectWebRootCandidate(bundledRoot, 'bundled-example', webGitConfig, requestedMode);
+    if (bundled) {
+      return bundled;
     }
   }
 
-  throw new Error(`Web entry not found. Expected ${path.join(configuredRoot, entry)}`);
+  const serverEntry = path.join(configuredRoot, getServerEntry(webGitConfig));
+  const staticEntry = getStaticEntryPath(configuredRoot, webGitConfig);
+  throw new Error(`Web entry not found. Expected ${serverEntry} or ${staticEntry}`);
 }
 
 async function loadEntryModule(entryPath) {
@@ -97,7 +177,7 @@ function normalizeStaticMount(mount, rootPath) {
   };
 }
 
-function validateManifest(manifest, webRoot, entryPath, source) {
+function validateManifest(manifest, webRoot, entryPath, source, mode = 'server-entry') {
   const safeManifest = manifest && typeof manifest === 'object' ? manifest : {};
   const root = safeManifest.root || safeManifest.siteRoot || 'public';
   const rootPath = resolveInside(webRoot, root, 'web app root');
@@ -126,6 +206,7 @@ function validateManifest(manifest, webRoot, entryPath, source) {
 
   return {
     name: safeManifest.name || path.basename(webRoot),
+    mode,
     source,
     webRoot,
     entryPath,
@@ -134,6 +215,9 @@ function validateManifest(manifest, webRoot, entryPath, source) {
     pageMap,
     staticMounts,
     fallbackPage: safeManifest.fallbackPage || '',
+    staticSite: safeManifest.staticSite && typeof safeManifest.staticSite === 'object'
+      ? safeManifest.staticSite
+      : null,
     securityHeaders: safeManifest.securityHeaders && typeof safeManifest.securityHeaders === 'object'
       ? safeManifest.securityHeaders
       : {},
@@ -141,10 +225,41 @@ function validateManifest(manifest, webRoot, entryPath, source) {
   };
 }
 
+function createStaticManifest(webGitConfig, webRoot, entryPath, mode, source) {
+  const staticEntry = getStaticEntry(webGitConfig);
+  const staticRoot = getStaticRoot(webGitConfig);
+  const spaFallback = webGitConfig.spaFallback ?? (mode === 'static-spa');
+  const htmlCacheControl = webGitConfig.htmlCacheControl || 'no-store';
+  const staticCacheControl = webGitConfig.staticCacheControl || 'public, max-age=300';
+
+  return validateManifest({
+    name: webGitConfig.name || path.basename(webRoot),
+    root: staticRoot,
+    pages: [
+      {
+        route: '/',
+        file: staticEntry,
+        cacheControl: htmlCacheControl
+      }
+    ],
+    fallbackPage: spaFallback ? staticEntry : '',
+    staticSite: {
+      enabled: true,
+      htmlCacheControl,
+      staticCacheControl,
+      spaFallback
+    }
+  }, webRoot, entryPath, source, mode);
+}
+
 async function loadWebApp(config) {
   const webGitConfig = config.git && config.git.web ? config.git.web : {};
-  const { webRoot, source } = chooseWebRoot(webGitConfig);
-  const entryPath = resolveInside(webRoot, webGitConfig.entry || 'server-entry.js', 'web entry');
+  const { webRoot, source, mode, entryPath } = chooseWebRoot(webGitConfig);
+
+  if (mode === 'static-spa' || mode === 'static-site') {
+    return createStaticManifest(webGitConfig, webRoot, entryPath, mode, source);
+  }
+
   const entryModule = await loadEntryModule(entryPath);
   const createWebApp = getEntryFactory(entryModule);
   const manifest = await Promise.resolve(createWebApp({
@@ -153,7 +268,7 @@ async function loadWebApp(config) {
     config
   }));
 
-  return validateManifest(manifest, webRoot, entryPath, source);
+  return validateManifest(manifest, webRoot, entryPath, source, mode);
 }
 
 module.exports = {

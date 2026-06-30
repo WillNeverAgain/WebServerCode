@@ -228,3 +228,41 @@ Runtime tunnel state is stored in `config/cloudflared.local.json`, which is not 
 
 - https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/
 - https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/do-more-with-tunnels/local-management/create-local-tunnel/
+
+## Static `index.html` web repositories
+
+The web repository no longer has to provide `server-entry.js`. A plain static
+repository is supported:
+
+```text
+your-web-repo/
+  index.html
+  assets/
+  pages/
+```
+
+Recommended config:
+
+```json
+"git": {
+  "web": {
+    "mode": "static-spa",
+    "url": "https://github.com/you/your-web-repo.git",
+    "localPath": "webapps/current",
+    "branch": "main",
+    "staticEntry": "index.html",
+    "staticRoot": ".",
+    "spaFallback": true
+  }
+}
+```
+
+Mode options:
+
+- `auto`: try `server-entry.js` first, then `index.html`.
+- `server-entry`: load the web repository entry module.
+- `static-spa`: serve static files and fall back to `index.html` for clean SPA routes.
+- `static-site`: serve static files without SPA route fallback.
+
+Static mode serves files directly from `staticRoot`; HTML uses
+`htmlCacheControl`, and other assets use `staticCacheControl`.

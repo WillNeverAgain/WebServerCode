@@ -123,6 +123,101 @@ function serveFile(req, res, filePath, basePath, cacheControl, config, webApp) {
   });
 }
 
+function getExistingFile(filePath, basePath) {
+  const resolvedFile = path.resolve(filePath);
+  const resolvedBase = path.resolve(basePath);
+
+  if (!isPathInside(resolvedBase, resolvedFile)) {
+    return {
+      ok: false,
+      statusCode: 403
+    };
+  }
+
+  try {
+    const stat = fs.statSync(resolvedFile);
+    if (!stat.isFile()) {
+      return {
+        ok: false,
+        statusCode: 404
+      };
+    }
+
+    return {
+      ok: true,
+      path: resolvedFile
+    };
+  } catch {
+    return {
+      ok: false,
+      statusCode: 404
+    };
+  }
+}
+
+function getStaticCacheControl(filePath, webApp) {
+  const staticSite = webApp.staticSite || {};
+  const extension = path.extname(filePath).toLowerCase();
+  if (extension === '.html' || extension === '.htm') {
+    return staticSite.htmlCacheControl || 'no-store';
+  }
+
+  return staticSite.staticCacheControl || 'public, max-age=300';
+}
+
+function shouldServeStaticFallback(req, requestPath, webApp) {
+  const staticSite = webApp.staticSite || {};
+  if (!staticSite.spaFallback || !webApp.fallbackPage) {
+    return false;
+  }
+
+  if (path.extname(requestPath)) {
+    return false;
+  }
+
+  const accept = req.headers.accept || '';
+  return accept === '' || accept.includes('text/html') || accept.includes('*/*');
+}
+
+function isBlockedStaticPath(relativePath) {
+  const blockedSegments = new Set(['.git', '.hg', '.svn', 'node_modules']);
+  return relativePath
+    .split(/[\\/]+/)
+    .filter(Boolean)
+    .some((segment) => {
+      const lower = segment.toLowerCase();
+      return blockedSegments.has(lower) || lower === '.env' || lower.startsWith('.env.');
+    });
+}
+
+function serveStaticSiteRequest(req, res, requestPath, config, webApp) {
+  const relativePath = requestPath === '/' ? webApp.fallbackPage : requestPath.slice(1);
+  if (isBlockedStaticPath(relativePath)) {
+    sendError(res, 404, 'Not found');
+    return true;
+  }
+
+  const candidate = getExistingFile(path.join(webApp.rootPath, relativePath), webApp.rootPath);
+
+  if (candidate.ok) {
+    serveFile(req, res, candidate.path, webApp.rootPath, getStaticCacheControl(candidate.path, webApp), config, webApp);
+    return true;
+  }
+
+  if (candidate.statusCode === 403) {
+    sendError(res, 403, 'Forbidden');
+    return true;
+  }
+
+  if (shouldServeStaticFallback(req, requestPath, webApp)) {
+    serveFile(req, res, path.join(webApp.rootPath, webApp.fallbackPage), webApp.rootPath, 'no-store', config, webApp);
+    return true;
+  }
+
+  sendError(res, 404, 'Not found');
+  return true;
+}
+
 function matchStaticMount(requestPath, webApp) {
   return webApp.staticMounts.find((mount) => requestPath.startsWith(mount.route));
 }
@@ -165,6 +260,7 @@ async function requestHandler(req, res) {
       domain: config.site.domain,
       webApp: webAppRuntime ? {
         name: webAppRuntime.name,
+        mode: webAppRuntime.mode,
         source: webAppRuntime.source,
         webRoot: webAppRuntime.webRoot,
         entryPath: webAppRuntime.entryPath,
@@ -212,6 +308,11 @@ async function requestHandler(req, res) {
     return;
   }
 
+  if (webAppRuntime.staticSite && webAppRuntime.staticSite.enabled) {
+    serveStaticSiteRequest(req, res, requestPath, config, webAppRuntime);
+    return;
+  }
+
   const mount = matchStaticMount(requestPath, webAppRuntime);
   if (mount) {
     const relative = requestPath.slice(mount.route.length);
@@ -247,6 +348,7 @@ async function startServer() {
     console.log(`[${new Date().toISOString()}] ${config.server.name || 'LocalHtmlServer'} listening on ${localUrl}`);
     console.log(`[${new Date().toISOString()}] Configured domain: ${config.site.domain}`);
     console.log(`[${new Date().toISOString()}] Web app: ${webAppRuntime.name} (${webAppRuntime.source})`);
+    console.log(`[${new Date().toISOString()}] Web mode: ${webAppRuntime.mode || 'server-entry'}`);
     console.log(`[${new Date().toISOString()}] Web entry: ${webAppRuntime.entryPath}`);
   });
 

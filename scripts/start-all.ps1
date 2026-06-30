@@ -85,10 +85,23 @@ function Test-ConfigShape {
   $domain = Get-PropertyValue $Config.site 'domain' ''
   $gitConfig = Get-PropertyValue $Config 'git' $null
   $webConfig = Get-PropertyValue $gitConfig 'web' $null
+  $webMode = ([string] (Get-PropertyValue $webConfig 'mode' 'auto')).Trim().ToLowerInvariant()
   $webEntry = Get-PropertyValue $webConfig 'entry' 'server-entry.js'
+  $staticEntry = Get-PropertyValue $webConfig 'staticEntry' 'index.html'
+  $staticRoot = Get-PropertyValue $webConfig 'staticRoot' '.'
   $webLocalPath = Resolve-ProjectPath (Get-PropertyValue $webConfig 'localPath' 'webapps\current')
   $fallback = Get-PropertyValue $webConfig 'fallbackToBundledExample' $true
   $bundledPath = Resolve-ProjectPath (Get-PropertyValue $webConfig 'bundledExamplePath' 'examples\web-repo')
+  $serverEntryPath = Join-Path $webLocalPath $webEntry
+  $staticEntryPath = Join-Path (Join-Path $webLocalPath $staticRoot) $staticEntry
+  $bundledServerEntryPath = Join-Path $bundledPath $webEntry
+  $bundledStaticEntryPath = Join-Path (Join-Path $bundledPath $staticRoot) $staticEntry
+
+  if ($webMode -in @('entry', 'server', 'module')) {
+    $webMode = 'server-entry'
+  } elseif ($webMode -in @('static', 'index', 'html')) {
+    $webMode = 'static-spa'
+  }
 
   if (-not [int]::TryParse([string] $port, [ref] ([int] $null))) {
     Add-ErrorMessage "server.port must be a number. Current value: $port"
@@ -101,15 +114,40 @@ function Test-ConfigShape {
     Add-Action "Configured public domain: $domain"
   }
 
-  if (-not (Test-Path -LiteralPath (Join-Path $webLocalPath $webEntry))) {
-    if ($fallback -and (Test-Path -LiteralPath (Join-Path $bundledPath $webEntry))) {
-      Add-Warning "Web repository entry was not found at $webLocalPath\$webEntry. The bundled example will be used."
+  if (-not ($webMode -in @('auto', 'server-entry', 'static-spa', 'static-site'))) {
+    Add-ErrorMessage "git.web.mode must be one of auto, server-entry, static-spa, static-site. Current value: $webMode"
+    $ok = $false
+  } elseif ($webMode -eq 'server-entry') {
+    if (Test-Path -LiteralPath $serverEntryPath) {
+      Add-Action "Web server entry found: $serverEntryPath"
+    } elseif ($fallback -and (Test-Path -LiteralPath $bundledServerEntryPath)) {
+      Add-Warning "Web server entry was not found at $serverEntryPath. The bundled example will be used."
     } else {
-      Add-ErrorMessage "Web entry not found: $webLocalPath\$webEntry. Configure git.web.url or set git.web.fallbackToBundledExample to true."
+      Add-ErrorMessage "Web server entry not found: $serverEntryPath. Configure git.web.url, change git.web.mode, or set git.web.fallbackToBundledExample to true."
+      $ok = $false
+    }
+  } elseif ($webMode -in @('static-spa', 'static-site')) {
+    if (Test-Path -LiteralPath $staticEntryPath) {
+      Add-Action "Static web entry found: $staticEntryPath"
+    } elseif ($fallback -and (Test-Path -LiteralPath $bundledStaticEntryPath)) {
+      Add-Warning "Static web entry was not found at $staticEntryPath. The bundled example will be used."
+    } else {
+      Add-ErrorMessage "Static web entry not found: $staticEntryPath. Put index.html in the web repo, change git.web.staticEntry/staticRoot, or use server-entry mode."
       $ok = $false
     }
   } else {
-    Add-Action "Web entry found: $webLocalPath\$webEntry"
+    if (Test-Path -LiteralPath $serverEntryPath) {
+      Add-Action "Web server entry found: $serverEntryPath"
+    } elseif (Test-Path -LiteralPath $staticEntryPath) {
+      Add-Action "Static web entry found: $staticEntryPath"
+    } elseif ($fallback -and (Test-Path -LiteralPath $bundledServerEntryPath)) {
+      Add-Warning "Configured web entry was not found. The bundled server-entry example will be used."
+    } elseif ($fallback -and (Test-Path -LiteralPath $bundledStaticEntryPath)) {
+      Add-Warning "Configured web entry was not found. The bundled static example will be used."
+    } else {
+      Add-ErrorMessage "Web entry not found. Checked server entry '$serverEntryPath' and static entry '$staticEntryPath'. Configure git.web.url, git.web.mode, or set git.web.fallbackToBundledExample to true."
+      $ok = $false
+    }
   }
 
   Add-Action "Local server target: http://${hostName}:${port}"
